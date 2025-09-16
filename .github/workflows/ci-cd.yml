@@ -5,6 +5,36 @@ on:
     branches: [ master, develop ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy from'
+        required: true
+        default: 'master'
+        type: choice
+        options:
+          - master
+          - develop
+      service:
+        description: 'Service to build and deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - api-service
+          - worker-service
+          - frontend-service
+      force_build:
+        description: 'Force build even without changes'
+        required: false
+        default: false
+        type: boolean
+      skip_tests:
+        description: 'Skip tests (for hotfixes)'
+        required: false
+        default: false
+        type: boolean
 
 env:
   REGISTRY: ghcr.io
@@ -15,17 +45,20 @@ jobs:
     name: Detect Changes
     runs-on: ubuntu-latest
     outputs:
-      api-service: ${{ steps.changes.outputs.api-service }}
-      worker-service: ${{ steps.changes.outputs.worker-service }}
-      frontend-service: ${{ steps.changes.outputs.frontend-service }}
-      any-service: ${{ steps.changes.outputs.any-service }}
+      api-service: ${{ steps.changes.outputs.api-service || steps.manual.outputs.api-service }}
+      worker-service: ${{ steps.changes.outputs.worker-service || steps.manual.outputs.worker-service }}
+      frontend-service: ${{ steps.changes.outputs.frontend-service || steps.manual.outputs.frontend-service }}
+      any-service: ${{ steps.changes.outputs.any-service || steps.manual.outputs.any-service }}
+      is-manual: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
       with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
         fetch-depth: 2
 
-    - name: Check for changes
+    - name: Check for changes (automatic)
+      if: github.event_name != 'workflow_dispatch'
       uses: dorny/paths-filter@v2
       id: changes
       with:
@@ -41,15 +74,60 @@ jobs:
             - 'worker-service/**'
             - 'frontend-service/**'
 
+    - name: Set manual dispatch flags
+      if: github.event_name == 'workflow_dispatch'
+      id: manual
+      run: |
+        SERVICE="${{ github.event.inputs.service }}"
+        FORCE_BUILD="${{ github.event.inputs.force_build }}"
+        
+        if [ "$SERVICE" = "all" ] || [ "$FORCE_BUILD" = "true" ]; then
+          echo "api-service=true" >> $GITHUB_OUTPUT
+          echo "worker-service=true" >> $GITHUB_OUTPUT
+          echo "frontend-service=true" >> $GITHUB_OUTPUT
+          echo "any-service=true" >> $GITHUB_OUTPUT
+        elif [ "$SERVICE" = "api-service" ]; then
+          echo "api-service=true" >> $GITHUB_OUTPUT
+          echo "worker-service=false" >> $GITHUB_OUTPUT
+          echo "frontend-service=false" >> $GITHUB_OUTPUT
+          echo "any-service=true" >> $GITHUB_OUTPUT
+        elif [ "$SERVICE" = "worker-service" ]; then
+          echo "api-service=false" >> $GITHUB_OUTPUT
+          echo "worker-service=true" >> $GITHUB_OUTPUT
+          echo "frontend-service=false" >> $GITHUB_OUTPUT
+          echo "any-service=true" >> $GITHUB_OUTPUT
+        elif [ "$SERVICE" = "frontend-service" ]; then
+          echo "api-service=false" >> $GITHUB_OUTPUT
+          echo "worker-service=false" >> $GITHUB_OUTPUT
+          echo "frontend-service=true" >> $GITHUB_OUTPUT
+          echo "any-service=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Display deployment plan
+      run: |
+        echo "Deployment Plan:"
+        echo "Trigger: ${{ github.event_name }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "Branch: ${{ github.event.inputs.branch }}"
+          echo "Service: ${{ github.event.inputs.service }}"
+          echo "Force Build: ${{ github.event.inputs.force_build }}"
+          echo "Skip Tests: ${{ github.event.inputs.skip_tests }}"
+        fi
+        echo "API Service: ${{ steps.changes.outputs.api-service || steps.manual.outputs.api-service }}"
+        echo "Worker Service: ${{ steps.changes.outputs.worker-service || steps.manual.outputs.worker-service }}"
+        echo "Frontend Service: ${{ steps.changes.outputs.frontend-service || steps.manual.outputs.frontend-service }}"
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.any-service == 'true'
+    if: needs.detect-changes.outputs.any-service == 'true' && github.event.inputs.skip_tests != 'true'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
 
     - name: Setup Node.js
       if: needs.detect-changes.outputs.api-service == 'true' || needs.detect-changes.outputs.frontend-service == 'true'
@@ -105,8 +183,12 @@ jobs:
     name: Build and Push Images
     runs-on: ubuntu-latest
     needs: [detect-changes, test]
-    if: github.ref == 'refs/heads/master' && needs.detect-changes.outputs.any-service == 'true'
-    environment: master
+    if: |
+      always() && 
+      (needs.test.result == 'success' || needs.test.result == 'skipped') && 
+      needs.detect-changes.outputs.any-service == 'true' && 
+      (github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
+    environment: ${{ github.event.inputs.branch || (github.ref == 'refs/heads/master' && 'master' || 'develop') }}
     
     strategy:
       matrix:
@@ -132,6 +214,8 @@ jobs:
     - name: Checkout code
       if: steps.check-service.outputs.changed == 'true'
       uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
 
     - name: Create .env file for frontend
       if: matrix.service == 'frontend-service' && steps.check-service.outputs.changed == 'true'
@@ -159,6 +243,12 @@ jobs:
           type=ref,event=pr
           type=sha,prefix={{branch}}-
           type=raw,value=latest,enable={{is_default_branch}}
+        labels: |
+          org.opencontainers.image.title=${{ matrix.service }}
+          org.opencontainers.image.description=Microservices ${{ matrix.service }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
     - name: Build and push Docker image
       if: steps.check-service.outputs.changed == 'true'
@@ -171,18 +261,28 @@ jobs:
 
     - name: Skip build message
       if: steps.check-service.outputs.changed != 'true'
-      run: echo "No changes detected in ${{ matrix.service }}, skipping build"
+      run: |
+        echo "⏭️ No changes detected in ${{ matrix.service }}, skipping build"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.service }}" != "${{ matrix.service }}" ]; then
+          echo "Service ${{ matrix.service }} not selected for manual deployment"
+        fi
 
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
     needs: [detect-changes, build]
-    if: github.ref == 'refs/heads/master' && needs.detect-changes.outputs.any-service == 'true'
-    environment: master
+    if: |
+      always() && 
+      needs.build.result == 'success' && 
+      needs.detect-changes.outputs.any-service == 'true' &&
+      (github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
+    environment: ${{ github.event.inputs.branch || (github.ref == 'refs/heads/master' && 'master' || 'develop') }}
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
 
     - name: Setup kubectl
       uses: azure/setup-kubectl@v3
@@ -235,7 +335,12 @@ jobs:
 
     - name: Show deployment summary
       run: |
-        echo "Deployment Summary:"
-        echo "API Service: ${{ needs.detect-changes.outputs.api-service == 'true' && 'Updated' || 'No changes' }}"
-        echo "Worker Service: ${{ needs.detect-changes.outputs.worker-service == 'true' && 'Updated' || 'No changes' }}"
-        echo "Frontend Service: ${{ needs.detect-changes.outputs.frontend-service == 'true' && 'Updated' || 'No changes' }}"
+        echo "🚀 Deployment Summary for ${{ github.event.inputs.branch || github.ref_name }}:"
+        echo "Trigger: ${{ github.event_name }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "Requested by: ${{ github.actor }}"
+          echo "Selected service: ${{ github.event.inputs.service }}"
+        fi
+        echo "API Service: ${{ needs.detect-changes.outputs.api-service == 'true' && '✅ Updated' || '⏭️ No changes' }}"
+        echo "Worker Service: ${{ needs.detect-changes.outputs.worker-service == 'true' && '✅ Updated' || '⏭️ No changes' }}"
+        echo "Frontend Service: ${{ needs.detect-changes.outputs.frontend-service == 'true' && '✅ Updated' || '⏭️ No changes' }}"
