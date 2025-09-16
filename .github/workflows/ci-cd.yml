@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
 
 env:
   REGISTRY: ghcr.io
@@ -65,7 +65,8 @@ jobs:
     name: Build and Push Images
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/master'
+    environment: master  # Add this line
     
     strategy:
       matrix:
@@ -74,6 +75,13 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+
+    - name: Create .env file for frontend
+      if: matrix.service == 'frontend-service'
+      run: |
+        cat > frontend-service/.env << 'EOF'
+        REACT_APP_API_URL=${{ vars.API_URL }}
+        EOF
 
     - name: Log in to Container Registry
       uses: docker/login-action@v2
@@ -105,7 +113,8 @@ jobs:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/master'
+    environment: master  # Add this line
     
     steps:
     - name: Checkout code
