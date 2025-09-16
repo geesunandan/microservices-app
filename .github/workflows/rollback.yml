@@ -1,0 +1,111 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to rollback'
+        required: true
+        type: choice
+        options:
+          - api-service
+          - worker-service
+          - frontend-service
+          - all
+      revision:
+        description: 'Revision number (leave empty for previous)'
+        required: false
+        type: string
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        default: 'master'
+        type: choice
+        options:
+          - master
+          - develop
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  rollback:
+    name: Rollback Services
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+
+    - name: Get deployment history
+      run: |
+        if [ "${{ github.event.inputs.service }}" = "all" ]; then
+          echo "=== API Service History ==="
+          kubectl rollout history deployment/api-service -n microservices
+          echo "=== Worker Service History ==="
+          kubectl rollout history deployment/worker-service -n microservices
+          echo "=== Frontend Service History ==="
+          kubectl rollout history deployment/frontend-service -n microservices
+        else
+          echo "=== ${{ github.event.inputs.service }} History ==="
+          kubectl rollout history deployment/${{ github.event.inputs.service }} -n microservices
+        fi
+
+    - name: Rollback API Service
+      if: github.event.inputs.service == 'api-service' || github.event.inputs.service == 'all'
+      run: |
+        echo "Rolling back api-service..."
+        if [ -n "${{ github.event.inputs.revision }}" ]; then
+          kubectl rollout undo deployment/api-service --to-revision=${{ github.event.inputs.revision }} -n microservices
+        else
+          kubectl rollout undo deployment/api-service -n microservices
+        fi
+        kubectl rollout status deployment/api-service -n microservices --timeout=300s
+
+    - name: Rollback Worker Service
+      if: github.event.inputs.service == 'worker-service' || github.event.inputs.service == 'all'
+      run: |
+        echo "Rolling back worker-service..."
+        if [ -n "${{ github.event.inputs.revision }}" ]; then
+          kubectl rollout undo deployment/worker-service --to-revision=${{ github.event.inputs.revision }} -n microservices
+        else
+          kubectl rollout undo deployment/worker-service -n microservices
+        fi
+        kubectl rollout status deployment/worker-service -n microservices --timeout=300s
+
+    - name: Rollback Frontend Service
+      if: github.event.inputs.service == 'frontend-service' || github.event.inputs.service == 'all'
+      run: |
+        echo "Rolling back frontend-service..."
+        if [ -n "${{ github.event.inputs.revision }}" ]; then
+          kubectl rollout undo deployment/frontend-service --to-revision=${{ github.event.inputs.revision }} -n microservices
+        else
+          kubectl rollout undo deployment/frontend-service -n microservices
+        fi
+        kubectl rollout status deployment/frontend-service -n microservices --timeout=300s
+
+    - name: Verify rollback
+      run: |
+        echo "Rollback completed successfully!"
+        kubectl get pods -n microservices
+        echo ""
+        echo "Current deployment revisions:"
+        if [ "${{ github.event.inputs.service }}" = "all" ]; then
+          kubectl rollout history deployment/api-service -n microservices | tail -1
+          kubectl rollout history deployment/worker-service -n microservices | tail -1
+          kubectl rollout history deployment/frontend-service -n microservices | tail -1
+        else
+          kubectl rollout history deployment/${{ github.event.inputs.service }} -n microservices | tail -1
+        fi
