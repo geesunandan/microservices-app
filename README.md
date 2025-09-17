@@ -505,4 +505,4 @@ kubectl apply -f k8s/frontend-service/
 3. Resource constraints (memory/CPU)
 4. Configuration errors in manifests
 
-Always start debugging with `kubectl logs` and `kubectl describe` - they provide 90% of the information you need to solve issues.
+Always start debugging with `kubectl logs` and `kubectl describe` 
